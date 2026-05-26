@@ -69,7 +69,7 @@
 {% endmacro %}
 
 {% macro public_marker() %}
-    <span class="text-info shrink-0" title="Public poll" aria-label="Public poll">
+    <span class="text-info shrink-0" title="Visible to everyone" aria-label="Visible to everyone">
         <i class="ti ti-world"></i>
     </span>
 {% endmacro %}
@@ -190,8 +190,8 @@
         {% endif %}
     {% endcall %}
 
-    {# 4. Public polls #}
-    {% call section_card('world', 'info', 'Public polls', data.public_open|length, 'polls.public') %}
+    {# 4. Polls visible to everyone #}
+    {% call section_card('world', 'info', 'For everyone', data.public_open|length, 'polls.public') %}
         {% if data.public_open %}
         <ul class="divide-y divide-base-200">
             {% for p in data.public_open %}
@@ -213,7 +213,7 @@
             {% endfor %}
         </ul>
         {% else %}
-            {{ empty_state('world-off', 'No open public polls', 'Public polls open to everyone will show up here.') }}
+            {{ empty_state('world-off', 'Nothing for everyone right now', 'Polls open to everyone signed in will show up here.') }}
         {% endif %}
     {% endcall %}
 

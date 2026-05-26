@@ -119,7 +119,7 @@ class PollForm(BaseModel):
     @model_validator(mode="after")
     def _check_public_not_mandatory(self) -> PollForm:
         if self.visibility == PollVisibility.PUBLIC and self.is_mandatory:
-            raise ValueError("public polls cannot be mandatory")
+            raise ValueError("polls visible to everyone cannot be mandatory")
         return self
 
     @model_validator(mode="after")

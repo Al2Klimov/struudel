@@ -74,7 +74,7 @@
           },
           visibilityHelp: {
               PRIVATE: "Only people in the audience can see and vote. You will be prompted to invite an audience before activation.",
-              PUBLIC: "Visible to every authenticated user. Audience invitations are still sent.",
+              PUBLIC: "Visible to everyone signed in. Audience invitations are still sent.",
           },
           modeHelp: {
               YES_NO_MAYBE: "Voters mark each option as Yes, Maybe, or No.",
@@ -137,7 +137,7 @@
                 <legend class="fieldset-legend">{{ legend_icon('eye') }}Visibility</legend>
                 <select id="visibility" name="visibility" x-model="visibility" class="select w-full">
                     <option value="PRIVATE">Private</option>
-                    <option value="PUBLIC">Public</option>
+                    <option value="PUBLIC">Everyone</option>
                 </select>
                 <p class="text-xs text-base-content/60 mt-1" x-text="visibilityHelp[visibility]"></p>
             </fieldset>
@@ -312,7 +312,7 @@
                             Everyone in the audience must respond. Requires at least one audience member when activated.
                         </span>
                         <span x-show="visibility === 'PUBLIC'">
-                            Not available for public polls — there is no defined audience to require.
+                            Not available when visible to everyone — there is no defined audience to require.
                         </span>
                     </div>
                 </div>

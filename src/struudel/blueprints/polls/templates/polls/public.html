@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block page_title %}Public polls{% endblock %}
+{% block page_title %}Polls for everyone{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-between mb-4">
@@ -14,7 +14,7 @@
 
 {% include "polls/_tabs.html" %}
 
-{% with polls=polls, show_owner=False, empty_hint='No public polls have been shared yet.' %}
+{% with polls=polls, show_owner=False, empty_hint='No polls visible to everyone yet.' %}
     {% include "polls/_list.html" %}
 {% endwith %}
 {% endblock %}
