@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 from flask import Flask, g
@@ -13,6 +14,7 @@ def init_template_globals(app: Flask) -> None:
             "current_user": g.user,
             "app_version": VERSION,
             "app_commit": COMMIT,
+            "current_year": datetime.now(UTC).year,
             "retention_days": settings.poll_retention_days,
             "oidc_provider_name": settings.oidc_provider_name,
         }

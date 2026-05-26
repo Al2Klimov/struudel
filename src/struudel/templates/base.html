@@ -113,9 +113,16 @@
         <div id="flash-region">{% include "_flashes.html" %}</div>
         {% block content %}{% endblock %}
     </main>
-    <footer class="border-t border-base-300 py-3 text-center text-xs text-base-content/60">
-        {% block footer %}Struudel &middot; v{{ app_version }} ({{ app_commit }}){% endblock %}
+    <footer x-data class="border-t border-base-300 py-3 text-center text-xs text-base-content/60">
+        {% block footer %}
+        <button type="button"
+                class="hover:text-base-content hover:underline transition-colors cursor-pointer"
+                @click="document.getElementById('about_modal').showModal()">
+            Struudel &middot; &copy; {{ current_year }} NETWAYS GmbH
+        </button>
+        {% endblock %}
     </footer>
+    {% include "_about_modal.html" %}
     <script defer src="{{ static_url('vendor/alpine/alpine.min.js') }}"></script>
     <script src="{{ static_url('vendor/htmx/htmx.min.js') }}"></script>
     <script src="{{ static_url('vendor/sortablejs/Sortable.min.js') }}"></script>
