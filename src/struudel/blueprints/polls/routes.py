@@ -8,17 +8,20 @@ from enum import Enum
 from typing import Any, Literal, cast
 from uuid import UUID
 
-from flask import abort, flash, g, redirect, render_template, request, url_for
+import sqlalchemy as sa
+from flask import abort, g, redirect, render_template, request, url_for
 from pydantic import ValidationError
 from werkzeug.wrappers import Response
 
 from struudel.auth import require_auth
 from struudel.blueprints.polls import bp
-from struudel.blueprints.polls.forms import AudienceForm, PollForm, PollOptionData, VoteForm
+from struudel.blueprints.polls.forms import PollForm, PollOptionData, VoteForm
 from struudel.database import SessionLocal
-from struudel.models.poll import Poll, PollStatus, PollVisibility
+from struudel.models.group import Group
+from struudel.models.poll import Poll, PollStatus
 from struudel.models.poll_option import PollOption, PollOptionType
 from struudel.models.poll_response import PollResponse
+from struudel.models.user import User
 from struudel.services import poll as poll_service
 from struudel.services.poll import InvalidVoteError, VoteGuard
 from struudel.timezones import to_local
@@ -105,6 +108,8 @@ def new() -> str | Response | tuple[str, int]:
             poll=None,
             form_data={},
             poll_options=[],
+            initial_users=[],
+            initial_groups=[],
             errors=[],
         )
 
@@ -117,42 +122,95 @@ def new() -> str | Response | tuple[str, int]:
                 poll=None,
                 form_data=request.form,
                 poll_options=_form_options_fallback(request.form.get("options", "")),
+                initial_users=_audience_chips_from_form(
+                    request.form.get("audience_users", ""), "user"
+                ),
+                initial_groups=_audience_chips_from_form(
+                    request.form.get("audience_groups", ""), "group"
+                ),
                 errors=exc.errors(),
             ),
             400,
         )
 
-    downgraded_to_draft = False
-    if form.status == PollStatus.ACTIVE and (
-        form.is_mandatory or form.visibility == PollVisibility.PRIVATE
-    ):
-        # New polls have no audience yet — a PRIVATE or mandatory poll going
-        # straight to ACTIVE would be unreachable for the intended audience.
-        form = form.model_copy(update={"status": PollStatus.DRAFT})
-        downgraded_to_draft = True
-
-    downgraded_no_options = False
-    if form.status == PollStatus.ACTIVE and not form.options:
-        form = form.model_copy(update={"status": PollStatus.DRAFT})
-        downgraded_no_options = True
-
     with SessionLocal() as db:
-        poll = poll_service.create_poll(db, form=form, created_by_id=g.user["id"])
+        try:
+            poll = poll_service.create_poll(
+                db,
+                form=form,
+                created_by_id=g.user["id"],
+                audience_user_ids=[m.id for m in form.audience_users],
+                audience_group_ids=[m.id for m in form.audience_groups],
+            )
+        except poll_service.ActiveRequiresOptionsError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=None,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(request.form.get("options", "")),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("options",), "msg": str(exc)}],
+                ),
+                400,
+            )
+        except poll_service.PrivateRequiresAudienceError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=None,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(request.form.get("options", "")),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("audience",), "msg": str(exc)}],
+                ),
+                400,
+            )
+        except poll_service.MandatoryRequiresAudienceError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=None,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(request.form.get("options", "")),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("is_mandatory",), "msg": str(exc)}],
+                ),
+                400,
+            )
+        except poll_service.InvalidStatusTransitionError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=None,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(request.form.get("options", "")),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("status",), "msg": str(exc)}],
+                ),
+                400,
+            )
         poll_id = poll.id
-
-    if downgraded_no_options:
-        flash(
-            "Saved as draft. Add at least one option, then set status to Active in Edit.",
-            "info",
-        )
-        return redirect(url_for("polls.edit", poll_id=poll_id))
-
-    if downgraded_to_draft:
-        flash(
-            "Saved as draft. Invite your audience here, then set status to Active in Edit.",
-            "info",
-        )
-        return redirect(url_for("polls.audience", poll_id=poll_id, return_to="edit"))
 
     return redirect(url_for("polls.edit", poll_id=poll_id))
 
@@ -168,11 +226,14 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
             abort(403)
 
         if request.method == "GET":
+            users, groups = poll_service.get_poll_audience(db, poll=poll)
             return render_template(
                 "polls/edit.html",
                 poll=poll,
                 form_data=_poll_to_form_data(poll),
                 poll_options=_poll_options_to_dicts(poll.options),
+                initial_users=_audience_users_to_dicts(users),
+                initial_groups=_audience_groups_to_dicts(groups),
                 errors=[],
             )
 
@@ -187,6 +248,12 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                     poll_options=_form_options_fallback(
                         request.form.get("options", ""),
                         fallback=_poll_options_to_dicts(poll.options),
+                    ),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
                     ),
                     errors=exc.errors(),
                 ),
@@ -206,12 +273,24 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                     request.form.get("options", ""),
                     fallback=_poll_options_to_dicts(poll.options),
                 ),
+                initial_users=_audience_chips_from_form(
+                    request.form.get("audience_users", ""), "user"
+                ),
+                initial_groups=_audience_chips_from_form(
+                    request.form.get("audience_groups", ""), "group"
+                ),
                 errors=[],
                 destructive_warning={"response_count": response_count},
             )
 
         try:
-            poll_service.update_poll(db, poll=poll, form=form)
+            poll_service.update_poll(
+                db,
+                poll=poll,
+                form=form,
+                audience_user_ids=[m.id for m in form.audience_users],
+                audience_group_ids=[m.id for m in form.audience_groups],
+            )
         except poll_service.MandatoryRequiresAudienceError as exc:
             return (
                 render_template(
@@ -221,6 +300,12 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                     poll_options=_form_options_fallback(
                         request.form.get("options", ""),
                         fallback=_poll_options_to_dicts(poll.options),
+                    ),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
                     ),
                     errors=[{"loc": ("is_mandatory",), "msg": str(exc)}],
                 ),
@@ -236,7 +321,13 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                         request.form.get("options", ""),
                         fallback=_poll_options_to_dicts(poll.options),
                     ),
-                    errors=[{"loc": ("visibility",), "msg": str(exc)}],
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("audience",), "msg": str(exc)}],
                 ),
                 400,
             )
@@ -250,7 +341,33 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                         request.form.get("options", ""),
                         fallback=_poll_options_to_dicts(poll.options),
                     ),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
                     errors=[{"loc": ("options",), "msg": str(exc)}],
+                ),
+                400,
+            )
+        except poll_service.InvalidStatusTransitionError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=poll,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(
+                        request.form.get("options", ""),
+                        fallback=_poll_options_to_dicts(poll.options),
+                    ),
+                    initial_users=_audience_chips_from_form(
+                        request.form.get("audience_users", ""), "user"
+                    ),
+                    initial_groups=_audience_chips_from_form(
+                        request.form.get("audience_groups", ""), "group"
+                    ),
+                    errors=[{"loc": ("status",), "msg": str(exc)}],
                 ),
                 400,
             )
@@ -414,86 +531,14 @@ def delete(poll_id: int) -> Response:
     return redirect(url_for("polls.my"))
 
 
-@bp.route("/<int:poll_id>/audience", methods=["GET", "POST"])
+@bp.route("/audience/search")
 @require_auth
-def audience(poll_id: int) -> str | Response | tuple[str, int]:
-    with SessionLocal() as db:
-        poll = poll_service.get_poll(db, poll_id=poll_id)
-        if poll is None:
-            abort(404)
-        if poll.created_by_id != g.user["id"]:
-            abort(403)
+def audience_search_global() -> str | tuple[str, int]:
+    """Audience search used by the inline picker on the create/edit form.
 
-        return_to = _audience_return_to(
-            request.args.get("return_to") or request.form.get("return_to")
-        )
-
-        if request.method == "GET":
-            users, groups = poll_service.get_poll_audience(db, poll=poll)
-            return render_template(
-                "polls/audience.html",
-                poll=poll,
-                is_owner=True,
-                initial_users=_audience_users_to_dicts(users),
-                initial_groups=_audience_groups_to_dicts(groups),
-                return_to=return_to,
-                errors=[],
-            )
-
-        try:
-            form = AudienceForm.model_validate(dict(request.form))
-        except ValidationError as exc:
-            users, groups = poll_service.get_poll_audience(db, poll=poll)
-            return (
-                render_template(
-                    "polls/audience.html",
-                    poll=poll,
-                    is_owner=True,
-                    initial_users=_audience_users_to_dicts(users),
-                    initial_groups=_audience_groups_to_dicts(groups),
-                    return_to=return_to,
-                    errors=exc.errors(),
-                ),
-                400,
-            )
-
-        try:
-            poll_service.set_poll_audience(
-                db,
-                poll=poll,
-                users=[m.id for m in form.users],
-                groups=[m.id for m in form.groups],
-            )
-        except (
-            poll_service.MandatoryRequiresAudienceError,
-            poll_service.PrivateRequiresAudienceError,
-        ) as exc:
-            users, groups = poll_service.get_poll_audience(db, poll=poll)
-            return (
-                render_template(
-                    "polls/audience.html",
-                    poll=poll,
-                    is_owner=True,
-                    initial_users=_audience_users_to_dicts(users),
-                    initial_groups=_audience_groups_to_dicts(groups),
-                    return_to=return_to,
-                    errors=[{"loc": ("audience",), "msg": str(exc)}],
-                ),
-                400,
-            )
-
-    if return_to == "edit":
-        return redirect(url_for("polls.edit", poll_id=poll_id))
-    return redirect(url_for("polls.audience", poll_id=poll_id))
-
-
-def _audience_return_to(value: str | None) -> str | None:
-    return "edit" if value == "edit" else None
-
-
-@bp.route("/<int:poll_id>/audience/search")
-@require_auth
-def audience_search(poll_id: int) -> str | tuple[str, int]:
+    Only requires authentication — the result set is a catalog-wide user/group
+    lookup and is not poll-specific.
+    """
     q = (request.args.get("q") or "").strip()
     kind = request.args.get("kind", "user")
 
@@ -501,12 +546,6 @@ def audience_search(poll_id: int) -> str | tuple[str, int]:
         abort(400)
 
     with SessionLocal() as db:
-        poll = poll_service.get_poll(db, poll_id=poll_id)
-        if poll is None:
-            abort(404)
-        if poll.created_by_id != g.user["id"]:
-            abort(403)
-
         if len(q) < 2:
             results: list[Any] = []
         else:
@@ -530,14 +569,16 @@ def _poll_to_form_data(poll: Poll) -> dict[str, Any]:
     bool_attribute_defaults: dict[str, bool] = {
         "auto_delete": True,
         "notify_owner_on_response": False,
-        "notify_audience_on_close": True,
+        "notify_audience_on_close": False,
         "anonymous_votes": False,
         "hide_results_until_close": False,
     }
     passthrough_attributes: set[str] = {"max_yes_choices"}
+    audience_fields: set[str] = {"audience_users", "audience_groups"}
     for name in PollForm.model_fields:
-        if name == "options":
-            continue  # rendered separately via _poll_options_to_dicts
+        if name == "options" or name in audience_fields:
+            # rendered separately via initial_users / initial_groups / poll_options
+            continue
         if name in bool_attribute_defaults:
             data[name] = bool(poll.attributes.get(name, bool_attribute_defaults[name]))
             continue
@@ -689,3 +730,27 @@ def _form_options_fallback(
     if not isinstance(parsed, list):
         return fallback or []
     return parsed
+
+
+def _audience_chips_from_form(raw: str, kind: Literal["user", "group"]) -> list[dict[str, Any]]:
+    """Rehydrate audience chips after a form validation failure.
+
+    The form submission only carries IDs (`[{id: 1}, ...]`); the Alpine picker
+    needs `{id, label, sublabel}` to re-render chips. We look up labels from
+    the DB so users don't lose their selection when validation fails.
+    """
+    try:
+        parsed = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    ids = [item.get("id") for item in parsed if isinstance(item, dict) and "id" in item]
+    if not ids:
+        return []
+    with SessionLocal() as db:
+        if kind == "user":
+            users = list(db.scalars(sa.select(User).where(User.id.in_(ids))))
+            return _audience_users_to_dicts(users)
+        groups = list(db.scalars(sa.select(Group).where(Group.id.in_(ids))))
+        return _audience_groups_to_dicts(groups)

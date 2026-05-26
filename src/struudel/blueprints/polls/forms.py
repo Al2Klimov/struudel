@@ -69,6 +69,12 @@ class PollOptionData(BaseModel):
         return self
 
 
+class AudienceMember(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    id: int
+
+
 class PollForm(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="ignore")
 
@@ -76,25 +82,24 @@ class PollForm(BaseModel):
     description_short: OptionalStr = None
     description_long: OptionalStr = None
 
-    status: PollStatus = PollStatus.DRAFT
-    visibility: PollVisibility = PollVisibility.PRIVATE
+    status: PollStatus = PollStatus.ACTIVE
+    visibility: PollVisibility = PollVisibility.PUBLIC
     response_mode: PollResponseMode = PollResponseMode.YES_NO_MAYBE
 
     is_mandatory: bool = False
     allow_custom_options: bool = False
-    allow_edit_responses: bool = False
+    allow_edit_responses: bool = True
     auto_delete: bool = True
     allow_guests: bool = False
     max_guests: Annotated[int | None, BeforeValidator(_empty_to_none)] = None
 
     notify_owner_on_response: bool = False
-    notify_audience_on_close: bool = True
+    notify_audience_on_close: bool = False
 
     anonymous_votes: bool = False
     hide_results_until_close: bool = False
     max_yes_choices: Annotated[int | None, BeforeValidator(_empty_to_none)] = None
 
-    edit_responses_until: OptionalDateTime = None
     starts_at: OptionalDateTime = None
     ends_at: OptionalDateTime = None
 
@@ -103,17 +108,19 @@ class PollForm(BaseModel):
         BeforeValidator(_empty_to_empty_list),
     ] = Field(default_factory=list)
 
+    audience_users: Annotated[
+        Json[list[AudienceMember]],
+        BeforeValidator(_empty_to_empty_list),
+    ] = Field(default_factory=list)
+    audience_groups: Annotated[
+        Json[list[AudienceMember]],
+        BeforeValidator(_empty_to_empty_list),
+    ] = Field(default_factory=list)
+
     @model_validator(mode="after")
     def _check_date_window(self) -> PollForm:
         if self.starts_at and self.ends_at and self.ends_at <= self.starts_at:
             raise ValueError("ends_at must be after starts_at")
-        if (
-            self.allow_edit_responses
-            and self.edit_responses_until
-            and self.ends_at
-            and self.edit_responses_until > self.ends_at
-        ):
-            raise ValueError("edit_responses_until cannot be after ends_at")
         return self
 
     @model_validator(mode="after")
@@ -139,25 +146,6 @@ class PollForm(BaseModel):
         if self.max_yes_choices is not None and not (1 <= self.max_yes_choices <= 50):
             raise ValueError("max_yes_choices must be between 1 and 50")
         return self
-
-
-class AudienceMember(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: int
-
-
-class AudienceForm(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    users: Annotated[
-        Json[list[AudienceMember]],
-        BeforeValidator(_empty_to_empty_list),
-    ] = Field(default_factory=list)
-    groups: Annotated[
-        Json[list[AudienceMember]],
-        BeforeValidator(_empty_to_empty_list),
-    ] = Field(default_factory=list)
 
 
 class VoteItem(BaseModel):

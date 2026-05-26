@@ -41,9 +41,7 @@ def try_claim_send_lock(key: str) -> bool:
     `<feature>:<purpose>:<ids>` (the `mail:` prefix is added here).
     """
     redis_key = f"mail:{key}".encode()
-    return bool(
-        app_state_redis_client.set(redis_key, b"1", ex=_SEND_DEDUP_TTL_SECONDS, nx=True)
-    )
+    return bool(app_state_redis_client.set(redis_key, b"1", ex=_SEND_DEDUP_TTL_SECONDS, nx=True))
 
 
 def _redact_recipient(address: str) -> str:
@@ -85,9 +83,7 @@ def send_mail(
     reply_to: str | None = None,
 ) -> None:
     if not settings.mail_enabled:
-        log.info(
-            "mail disabled, skipping send to %s (subject=%r)", _redact_recipient(to), subject
-        )
+        log.info("mail disabled, skipping send to %s (subject=%r)", _redact_recipient(to), subject)
         log.debug("mail disabled, full recipient was %s", to)
         return
 

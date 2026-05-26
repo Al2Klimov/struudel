@@ -272,6 +272,33 @@ class ActiveRequiresOptionsError(ValueError):
     """Raised when a poll is activated without any options."""
 
 
+class InvalidStatusTransitionError(ValueError):
+    """Raised when a poll's status change violates the forward-only lifecycle.
+
+    Lifecycle: DRAFT → ACTIVE → CLOSED. CLOSED is terminal. DRAFT polls cannot
+    skip straight to CLOSED (they have no audience yet to notify); delete them
+    instead. New polls may be created as DRAFT or ACTIVE (never CLOSED).
+    """
+
+
+_ALLOWED_TRANSITIONS: dict[PollStatus, set[PollStatus]] = {
+    PollStatus.DRAFT: {PollStatus.DRAFT, PollStatus.ACTIVE},
+    PollStatus.ACTIVE: {PollStatus.ACTIVE, PollStatus.CLOSED},
+    PollStatus.CLOSED: {PollStatus.CLOSED},
+}
+
+
+def _validate_status_transition(old: PollStatus, new: PollStatus) -> None:
+    if old == PollStatus.TEMPLATE or new == PollStatus.TEMPLATE:
+        # Templates live outside the lifecycle and are never mutated via
+        # update_poll; defensive bail-out.
+        raise InvalidStatusTransitionError("templates cannot change status")
+    if new not in _ALLOWED_TRANSITIONS[old]:
+        raise InvalidStatusTransitionError(
+            f"cannot move poll from {old.value} to {new.value} — status is forward-only"
+        )
+
+
 def _dispatch_activation_invitations(db: Session, *, poll: Poll) -> None:
     if poll.starts_at is not None and poll.starts_at > datetime.now(UTC):
         # Voting hasn't opened yet — dispatch_pending_invitations_task picks
@@ -310,18 +337,36 @@ def _dispatch_close_notifications(db: Session, *, poll: Poll) -> None:
         send_non_responder_report_task(poll.id)
 
 
-def create_poll(db: Session, *, form: PollForm, created_by_id: int) -> Poll:
+def create_poll(
+    db: Session,
+    *,
+    form: PollForm,
+    created_by_id: int,
+    audience_user_ids: list[int] | None = None,
+    audience_group_ids: list[int] | None = None,
+) -> Poll:
+    if form.status not in {PollStatus.DRAFT, PollStatus.ACTIVE}:
+        raise InvalidStatusTransitionError(
+            f"new polls must start as DRAFT or ACTIVE, not {form.status.value}"
+        )
+
     if form.status == PollStatus.ACTIVE and not form.options:
         raise ActiveRequiresOptionsError("active polls require at least one option")
 
-    if form.is_mandatory and form.status == PollStatus.ACTIVE:
+    audience_user_ids = audience_user_ids or []
+    audience_group_ids = audience_group_ids or []
+    has_audience = bool(audience_user_ids) or bool(audience_group_ids)
+
+    if form.is_mandatory and form.status == PollStatus.ACTIVE and not has_audience:
         raise MandatoryRequiresAudienceError(
             "mandatory polls require a non-empty audience before activation"
         )
 
-    if form.visibility == PollVisibility.PRIVATE and form.status == PollStatus.ACTIVE:
-        # At create-time there is no audience yet, so any PRIVATE+ACTIVE attempt
-        # is unreachable for everyone except the owner.
+    if (
+        form.visibility == PollVisibility.PRIVATE
+        and form.status == PollStatus.ACTIVE
+        and not has_audience
+    ):
         raise PrivateRequiresAudienceError(
             "private polls require a non-empty audience before activation"
         )
@@ -336,7 +381,6 @@ def create_poll(db: Session, *, form: PollForm, created_by_id: int) -> Poll:
         is_mandatory=form.is_mandatory,
         allow_custom_options=form.allow_custom_options,
         allow_edit_responses=form.allow_edit_responses,
-        edit_responses_until=form.edit_responses_until if form.allow_edit_responses else None,
         allow_guests=form.allow_guests,
         max_guests=form.max_guests if form.allow_guests else None,
         starts_at=form.starts_at,
@@ -357,18 +401,44 @@ def create_poll(db: Session, *, form: PollForm, created_by_id: int) -> Poll:
     _apply_options(db, poll=poll, options=form.options)
     db.commit()
     db.refresh(poll)
+
+    if has_audience:
+        set_poll_audience(db, poll=poll, users=audience_user_ids, groups=audience_group_ids)
+        if poll.status == PollStatus.ACTIVE:
+            # set_poll_audience has already dispatched invitations to the
+            # initial audience. Claim the invitation lock so the deferred
+            # dispatch_pending_invitations_task (which scans recently-started
+            # polls) does not re-fire and produce duplicate invitations when
+            # the poll's `starts_at` happens to fall in its scan window.
+            from struudel.mail import try_claim_invitation_lock
+
+            try_claim_invitation_lock(poll.id)
+
     return poll
 
 
-def update_poll(db: Session, *, poll: Poll, form: PollForm) -> Poll:
+def update_poll(
+    db: Session,
+    *,
+    poll: Poll,
+    form: PollForm,
+    audience_user_ids: list[int] | None = None,
+    audience_group_ids: list[int] | None = None,
+) -> Poll:
+    _validate_status_transition(poll.status, form.status)
+
     if form.status == PollStatus.ACTIVE and not form.options:
         raise ActiveRequiresOptionsError("active polls require at least one option")
 
-    if (
-        form.is_mandatory
-        and form.status == PollStatus.ACTIVE
-        and count_poll_audience(db, poll_id=poll.id) == 0
-    ):
+    # When the route passes new audience IDs, validate against those instead of
+    # the current DB state — otherwise a private DRAFT being switched to ACTIVE
+    # in the same submit (with audience added inline) would falsely trip below.
+    if audience_user_ids is not None or audience_group_ids is not None:
+        prospective_audience_count = len(audience_user_ids or []) + len(audience_group_ids or [])
+    else:
+        prospective_audience_count = count_poll_audience(db, poll_id=poll.id)
+
+    if form.is_mandatory and form.status == PollStatus.ACTIVE and prospective_audience_count == 0:
         raise MandatoryRequiresAudienceError(
             "mandatory polls require a non-empty audience before activation"
         )
@@ -376,7 +446,7 @@ def update_poll(db: Session, *, poll: Poll, form: PollForm) -> Poll:
     if (
         form.visibility == PollVisibility.PRIVATE
         and form.status == PollStatus.ACTIVE
-        and count_poll_audience(db, poll_id=poll.id) == 0
+        and prospective_audience_count == 0
     ):
         raise PrivateRequiresAudienceError(
             "private polls require a non-empty audience before activation"
@@ -393,7 +463,6 @@ def update_poll(db: Session, *, poll: Poll, form: PollForm) -> Poll:
     poll.is_mandatory = form.is_mandatory
     poll.allow_custom_options = form.allow_custom_options
     poll.allow_edit_responses = form.allow_edit_responses
-    poll.edit_responses_until = form.edit_responses_until if form.allow_edit_responses else None
     poll.allow_guests = form.allow_guests
     poll.max_guests = form.max_guests if form.allow_guests else None
     poll.starts_at = form.starts_at
@@ -413,7 +482,18 @@ def update_poll(db: Session, *, poll: Poll, form: PollForm) -> Poll:
     db.commit()
     db.refresh(poll)
 
-    if old_status == PollStatus.DRAFT and poll.status == PollStatus.ACTIVE:
+    will_dispatch_activation = old_status == PollStatus.DRAFT and poll.status == PollStatus.ACTIVE
+
+    if audience_user_ids is not None or audience_group_ids is not None:
+        set_poll_audience(
+            db,
+            poll=poll,
+            users=audience_user_ids or [],
+            groups=audience_group_ids or [],
+            dispatch_invites=not will_dispatch_activation,
+        )
+
+    if will_dispatch_activation:
         _dispatch_activation_invitations(db, poll=poll)
     elif old_status != PollStatus.CLOSED and poll.status == PollStatus.CLOSED:
         _dispatch_close_notifications(db, poll=poll)
@@ -743,7 +823,13 @@ def set_poll_audience(
     poll: Poll,
     users: list[int],
     groups: list[int],
+    dispatch_invites: bool = True,
 ) -> None:
+    # `dispatch_invites=False` is the escape hatch for callers (currently
+    # `update_poll` on a DRAFT→ACTIVE transition) that will themselves trigger
+    # `_dispatch_activation_invitations` afterwards — otherwise newly added
+    # users would receive *two* invitation mails (one from here for the `added`
+    # delta, one from the activation dispatch for the full audience).
     if poll.is_mandatory and poll.status == PollStatus.ACTIVE and not users and not groups:
         raise MandatoryRequiresAudienceError(
             "mandatory polls require a non-empty audience while active"
@@ -778,6 +864,9 @@ def set_poll_audience(
             db.execute(sa.insert(poll_groups), rows)
 
     db.commit()
+
+    if not dispatch_invites:
+        return
 
     if poll.status == PollStatus.ACTIVE:
         if poll.starts_at is not None and poll.starts_at > datetime.now(UTC):
@@ -836,10 +925,7 @@ def user_can_vote_on_poll(poll: Poll, *, now: datetime) -> VoteGuard:
     if poll.ends_at is not None and now > poll.ends_at:
         return VoteGuard(can_vote=False, can_edit=False, reason="closed")
 
-    can_edit = poll.allow_edit_responses and (
-        poll.edit_responses_until is None or now <= poll.edit_responses_until
-    )
-    return VoteGuard(can_vote=True, can_edit=can_edit, reason=None)
+    return VoteGuard(can_vote=True, can_edit=poll.allow_edit_responses, reason=None)
 
 
 def get_user_response(db: Session, *, poll_id: int, user_id: int) -> PollResponse | None:

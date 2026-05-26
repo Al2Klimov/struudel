@@ -95,7 +95,6 @@ class Poll(Base, TimestampMixin):
     allow_edit_responses: Mapped[bool] = mapped_column(
         sa.Boolean, default=False, server_default=sa.text("false")
     )
-    edit_responses_until: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
     auto_delete_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True), index=True)
 

@@ -17,7 +17,6 @@ def _make_active_poll(
     owner_id: int,
     visibility: PollVisibility = PollVisibility.PUBLIC,
     allow_edit_responses: bool = True,
-    edit_responses_until: datetime | None = None,
 ) -> Poll:
     poll = Poll(
         title="Route Test",
@@ -25,7 +24,6 @@ def _make_active_poll(
         visibility=visibility,
         response_mode=PollResponseMode.YES_NO_MAYBE,
         allow_edit_responses=allow_edit_responses,
-        edit_responses_until=edit_responses_until,
         attributes={"auto_delete": False},
         created_by_id=owner_id,
     )
@@ -187,7 +185,7 @@ def test_vote_withdraw_409_when_editing_disabled(db_session: Session, client: Fl
     assert poll_service.count_responses(db_session, poll_id=poll.id) == 1
 
 
-def test_vote_withdraw_409_outside_edit_window(db_session: Session, client: FlaskClient) -> None:
+def test_vote_withdraw_409_after_poll_ends(db_session: Session, client: FlaskClient) -> None:
     owner = make_user(db_session)
     voter = make_user(db_session, email="voter@test.local")
     past = datetime.now(UTC) - timedelta(hours=1)
@@ -195,7 +193,6 @@ def test_vote_withdraw_409_outside_edit_window(db_session: Session, client: Flas
         db_session,
         owner_id=owner.id,
         allow_edit_responses=True,
-        edit_responses_until=past,
     )
     poll.ends_at = past
     db_session.flush()

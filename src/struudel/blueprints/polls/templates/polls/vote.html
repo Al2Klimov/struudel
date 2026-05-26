@@ -63,7 +63,7 @@
             <div>
                 Your response was recorded on {{ my_response.submitted_at | localtime }}.
                 {% if guard.can_edit %}
-                    You can still update it{% if poll.edit_responses_until %} until {{ poll.edit_responses_until | localtime }}{% endif %}.
+                    You can still update it while the poll is open.
                 {% else %}
                     Editing is disabled.
                 {% endif %}

@@ -29,7 +29,6 @@ def _make_poll(
     starts_at: datetime | None = None,
     ends_at: datetime | None = None,
     allow_edit_responses: bool = False,
-    edit_responses_until: datetime | None = None,
     auto_delete: bool = False,
     options: list[str] | None = None,
 ) -> Poll:
@@ -41,7 +40,6 @@ def _make_poll(
         starts_at=starts_at,
         ends_at=ends_at,
         allow_edit_responses=allow_edit_responses,
-        edit_responses_until=edit_responses_until,
         attributes={"auto_delete": auto_delete},
         created_by_id=owner_id,
     )
@@ -132,14 +130,12 @@ def test_guard_closed_after_ends_at(db_session: Session) -> None:
     assert guard.reason == "closed"
 
 
-def test_guard_can_edit_with_open_window(db_session: Session) -> None:
+def test_guard_can_edit_with_allow_edit_set(db_session: Session) -> None:
     owner = make_user(db_session)
-    future = datetime.now(UTC) + timedelta(hours=1)
     poll = _make_poll(
         db_session,
         owner_id=owner.id,
         allow_edit_responses=True,
-        edit_responses_until=future,
     )
     guard = poll_service.user_can_vote_on_poll(poll, now=datetime.now(UTC))
     assert guard.can_edit is True
@@ -492,3 +488,113 @@ def test_create_poll_public_active_ok_without_audience(db_session: Session) -> N
     )
     poll = poll_service.create_poll(db_session, form=form, created_by_id=owner.id)
     assert poll.status == PollStatus.ACTIVE
+
+
+# ---------------------------------------------------------------------------
+# Forward-only status lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _form_with_status(status: str) -> PollForm:
+    return PollForm.model_validate(
+        {
+            "title": "T",
+            "status": status,
+            "visibility": "PUBLIC",
+            "options": json.dumps([{"type": "TEXT", "text_value": "Yes"}]),
+        }
+    )
+
+
+def test_create_poll_rejects_closed_status(db_session: Session) -> None:
+    owner = make_user(db_session)
+    with pytest.raises(poll_service.InvalidStatusTransitionError):
+        poll_service.create_poll(
+            db_session, form=_form_with_status("CLOSED"), created_by_id=owner.id
+        )
+
+
+def test_update_poll_rejects_active_to_draft(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.ACTIVE,
+        visibility=PollVisibility.PUBLIC,
+    )
+    with pytest.raises(poll_service.InvalidStatusTransitionError):
+        poll_service.update_poll(db_session, poll=poll, form=_form_with_status("DRAFT"))
+
+
+def test_update_poll_rejects_draft_to_closed(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.DRAFT,
+        visibility=PollVisibility.PUBLIC,
+    )
+    with pytest.raises(poll_service.InvalidStatusTransitionError):
+        poll_service.update_poll(db_session, poll=poll, form=_form_with_status("CLOSED"))
+
+
+def test_update_poll_rejects_closed_reopen(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.CLOSED,
+        visibility=PollVisibility.PUBLIC,
+    )
+    with pytest.raises(poll_service.InvalidStatusTransitionError):
+        poll_service.update_poll(db_session, poll=poll, form=_form_with_status("ACTIVE"))
+
+
+def test_update_poll_allows_active_to_closed(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.ACTIVE,
+        visibility=PollVisibility.PUBLIC,
+    )
+    poll_service.update_poll(db_session, poll=poll, form=_form_with_status("CLOSED"))
+    assert poll.status == PollStatus.CLOSED
+
+
+def test_draft_to_active_with_inline_audience_invites_each_user_once(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: activating a DRAFT poll while adding audience in the same
+    update_poll() call previously triggered two send_invitation_task calls per
+    user — once from set_poll_audience (because poll.status was already
+    flipped to ACTIVE) and once from _dispatch_activation_invitations.
+    """
+    sent: list[tuple[int, int]] = []
+
+    def fake_send(poll_id: int, user_id: int) -> None:
+        sent.append((poll_id, user_id))
+
+    monkeypatch.setattr("struudel.tasks.mail.send_invitation.send_invitation_task", fake_send)
+    # The invitation lock lives in Redis; clear/claim deterministically.
+    monkeypatch.setattr("struudel.mail.try_claim_invitation_lock", lambda poll_id: True)
+
+    owner = make_user(db_session)
+    invitee = make_user(db_session, email="invitee@test.local")
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.DRAFT,
+        visibility=PollVisibility.PRIVATE,
+    )
+
+    poll_service.update_poll(
+        db_session,
+        poll=poll,
+        form=_private_active_form(),
+        audience_user_ids=[invitee.id],
+        audience_group_ids=[],
+    )
+
+    assert poll.status == PollStatus.ACTIVE
+    assert sent.count((poll.id, invitee.id)) == 1

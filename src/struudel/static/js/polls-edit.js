@@ -84,3 +84,115 @@ function optionsEditor(initial) {
         },
     };
 }
+
+// The single Alpine component for the whole edit form. Owns:
+//  - top-level form state (status, visibility, mandatory, ...)
+//  - the inline audience picker state (users/groups + search dropdowns)
+//  - save-button gating logic
+function pollEditor(initial) {
+    return {
+        ...initial,
+        users: initial.initialUsers || [],
+        groups: initial.initialGroups || [],
+        userSearchOpen: false,
+        groupSearchOpen: false,
+        // Audience picker is auto-expanded on PRIVATE (mandatory) or when an
+        // audience already exists; on a fresh PUBLIC poll it starts collapsed
+        // to reduce visual noise — user can opt in via the compact toggle.
+        audienceExpanded:
+            initial.visibility === "PRIVATE" ||
+            (initial.initialUsers || []).length > 0 ||
+            (initial.initialGroups || []).length > 0,
+        statusHelp: {
+            DRAFT: "Hidden from the audience. Saved but not yet open for voting.",
+            ACTIVE: "Open for voting. Audience members can submit responses.",
+            CLOSED: "No more votes accepted. Results remain visible.",
+        },
+        // Forward-only lifecycle: DRAFT → ACTIVE → CLOSED. For new polls
+        // (originalStatus == null) CLOSED is also blocked — you can't create
+        // an already-closed poll.
+        statusAllowed(target) {
+            const from = this.originalStatus;
+            if (from === null) return target === "DRAFT" || target === "ACTIVE";
+            if (from === "DRAFT") return target === "DRAFT" || target === "ACTIVE";
+            if (from === "ACTIVE") return target === "ACTIVE" || target === "CLOSED";
+            if (from === "CLOSED") return target === "CLOSED";
+            return false;
+        },
+        visibilityHelp: {
+            PRIVATE: "Only invited users or groups can see and vote.",
+            PUBLIC: "Visible to everyone signed in. Anyone in the audience below still gets an invitation email.",
+        },
+        modeHelp: {
+            YES_NO_MAYBE: "Voters mark each option as Yes, Maybe, or No.",
+            SINGLE_CHOICE: "Voters pick exactly one option.",
+            MULTI_CHOICE: "Voters pick any number of options (with optional cap).",
+        },
+        addUser(u) {
+            if (!u || !u.id) return;
+            if (!this.users.find((x) => x.id === u.id)) {
+                this.users.push({
+                    id: u.id,
+                    label: u.label || "",
+                    sublabel: u.sublabel || "",
+                });
+            }
+            this.userSearchOpen = false;
+            if (this.$refs.userSearchInput) {
+                this.$refs.userSearchInput.value = "";
+            }
+            const dropdown = document.getElementById("user-search-results");
+            if (dropdown) dropdown.innerHTML = "";
+        },
+        addGroup(g) {
+            if (!g || !g.id) return;
+            if (!this.groups.find((x) => x.id === g.id)) {
+                this.groups.push({
+                    id: g.id,
+                    label: g.label || "",
+                    sublabel: g.sublabel || "",
+                });
+            }
+            this.groupSearchOpen = false;
+            if (this.$refs.groupSearchInput) {
+                this.$refs.groupSearchInput.value = "";
+            }
+            const dropdown = document.getElementById("group-search-results");
+            if (dropdown) dropdown.innerHTML = "";
+        },
+        removeUser(id) {
+            this.users = this.users.filter((x) => x.id !== id);
+        },
+        removeGroup(id) {
+            this.groups = this.groups.filter((x) => x.id !== id);
+        },
+        serializeUsers() {
+            return JSON.stringify(this.users.map((x) => ({ id: x.id })));
+        },
+        serializeGroups() {
+            return JSON.stringify(this.groups.map((x) => ({ id: x.id })));
+        },
+        saveBlocked() {
+            if (this.status !== "ACTIVE") return false;
+            if (!this.hasOptions) return true;
+            if (this.visibility === "PRIVATE" && this.users.length === 0 && this.groups.length === 0) {
+                return true;
+            }
+            return false;
+        },
+        saveBlockedReason() {
+            if (this.status === "ACTIVE" && !this.hasOptions) {
+                return "Add at least one option to activate this poll.";
+            }
+            if (
+                this.status === "ACTIVE" &&
+                this.visibility === "PRIVATE" &&
+                this.users.length === 0 &&
+                this.groups.length === 0
+            ) {
+                return "Invite at least one user or group to activate this private poll.";
+            }
+            return "";
+        },
+    };
+}

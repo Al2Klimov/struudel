@@ -51,40 +51,32 @@
 <form method="post"
       action="{% if is_new %}{{ url_for('polls.new') }}{% else %}{{ url_for('polls.edit', poll_id=poll.id) }}{% endif %}"
       class="max-w-3xl bg-base-100 rounded-box border border-base-300 shadow-sm divide-y divide-base-200"
-      x-data='{
-          allowEdit: {{ "true" if form_data.get("allow_edit_responses") else "false" }},
+      x-data='pollEditor({
+          allowEdit: {{ "true" if (is_new or form_data.get("allow_edit_responses")) else "false" }},
           customOptions: {{ "true" if form_data.get("allow_custom_options") else "false" }},
           autoDelete: {{ "true" if (is_new or form_data.get("auto_delete")) else "false" }},
           notifyOwnerOnResponse: {{ "true" if form_data.get("notify_owner_on_response") else "false" }},
-          notifyAudienceOnClose: {{ "true" if (is_new or form_data.get("notify_audience_on_close")) else "false" }},
+          notifyAudienceOnClose: {{ "true" if form_data.get("notify_audience_on_close") else "false" }},
           anonymousVotes: {{ "true" if form_data.get("anonymous_votes") else "false" }},
           hideResultsUntilClose: {{ "true" if form_data.get("hide_results_until_close") else "false" }},
           maxYesChoices: {{ form_data.get("max_yes_choices", "") | tojson }},
           allowGuests: {{ "true" if form_data.get("allow_guests") else "false" }},
           maxGuests: {{ form_data.get("max_guests", "") | tojson }},
-          visibility: {{ form_data.get("visibility", "PRIVATE") | tojson }},
+          visibility: {{ form_data.get("visibility", "PUBLIC") | tojson }},
           isMandatory: {{ "true" if form_data.get("is_mandatory") else "false" }},
-          status: {{ form_data.get("status", "DRAFT") | tojson }},
+          status: {{ form_data.get("status", "ACTIVE") | tojson }},
           hasOptions: {{ "true" if (poll_options | length) > 0 else "false" }},
           responseMode: {{ form_data.get("response_mode", "YES_NO_MAYBE") | tojson }},
-          statusHelp: {
-              DRAFT: "Hidden from the audience. Saved but not yet open for voting.",
-              ACTIVE: "Open for voting. Audience members can submit responses.",
-              CLOSED: "No more votes accepted. Results remain visible.",
-          },
-          visibilityHelp: {
-              PRIVATE: "Only people in the audience can see and vote. You will be prompted to invite an audience before activation.",
-              PUBLIC: "Visible to everyone signed in. Audience invitations are still sent.",
-          },
-          modeHelp: {
-              YES_NO_MAYBE: "Voters mark each option as Yes, Maybe, or No.",
-              SINGLE_CHOICE: "Voters pick exactly one option.",
-              MULTI_CHOICE: "Voters pick any number of options (with optional cap).",
-          }
-      }'
-      x-effect="if (visibility === 'PUBLIC') isMandatory = false; if (!hasOptions && status === 'ACTIVE') status = 'DRAFT';"
-      @options-count-changed="hasOptions = $event.detail.count > 0">
+          initialUsers: {{ initial_users | tojson }},
+          initialGroups: {{ initial_groups | tojson }},
+          originalStatus: {{ (poll.status.value if poll else None) | tojson }},
+      })'
+      x-effect="if (visibility === 'PUBLIC') isMandatory = false;"
+      @options-count-changed="hasOptions = $event.detail.count > 0"
+      @keydown.escape.window="userSearchOpen = false; groupSearchOpen = false">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="audience_users" :value="serializeUsers()">
+    <input type="hidden" name="audience_groups" :value="serializeGroups()">
     {% if destructive_warning %}
     <input type="hidden" name="confirm_destructive" value="1">
     {% endif %}
@@ -124,20 +116,17 @@
             <fieldset class="fieldset">
                 <legend class="fieldset-legend">{{ legend_icon('pulse') }}Status</legend>
                 <select id="status" name="status" x-model="status" class="select w-full">
-                    <option value="DRAFT">Draft</option>
-                    <option value="ACTIVE" :disabled="!hasOptions">Active</option>
-                    <option value="CLOSED">Closed</option>
+                    <option value="DRAFT" :disabled="!statusAllowed('DRAFT')">Draft</option>
+                    <option value="ACTIVE" :disabled="!statusAllowed('ACTIVE')">Active</option>
+                    <option value="CLOSED" :disabled="!statusAllowed('CLOSED')">Closed</option>
                 </select>
                 <p class="text-xs text-base-content/60 mt-1" x-text="statusHelp[status]"></p>
-                <p x-show="!hasOptions" class="text-xs text-warning mt-1">
-                    Add at least one option to activate this poll.
-                </p>
             </fieldset>
             <fieldset class="fieldset">
                 <legend class="fieldset-legend">{{ legend_icon('eye') }}Visibility</legend>
                 <select id="visibility" name="visibility" x-model="visibility" class="select w-full">
-                    <option value="PRIVATE">Private</option>
                     <option value="PUBLIC">Everyone</option>
+                    <option value="PRIVATE">Private</option>
                 </select>
                 <p class="text-xs text-base-content/60 mt-1" x-text="visibilityHelp[visibility]"></p>
             </fieldset>
@@ -173,7 +162,10 @@
 
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <fieldset class="fieldset">
-                <legend class="fieldset-legend">{{ legend_icon('player-play') }}Starts at</legend>
+                <legend class="fieldset-legend">
+                    {{ legend_icon('player-play') }}Starts at
+                    <span class="text-base-content/40 font-normal ms-1">(optional)</span>
+                </legend>
                 <div x-data='dateHourPicker({{ form_data.get("starts_at", "") | tojson }})' class="flex gap-2">
                     <input type="date" x-model="date" class="input flex-1">
                     <select x-model="hour" class="select w-28">
@@ -189,9 +181,15 @@
                     </button>
                     <input type="hidden" name="starts_at" :value="combined()">
                 </div>
+                <p class="text-xs text-base-content/60 mt-1">
+                    Leave empty to open the poll immediately.
+                </p>
             </fieldset>
             <fieldset class="fieldset">
-                <legend class="fieldset-legend">{{ legend_icon('player-stop') }}Ends at</legend>
+                <legend class="fieldset-legend">
+                    {{ legend_icon('player-stop') }}Ends at
+                    <span class="text-base-content/40 font-normal ms-1">(optional)</span>
+                </legend>
                 <div x-data='dateHourPicker({{ form_data.get("ends_at", "") | tojson }})' class="flex gap-2">
                     <input type="date" x-model="date" class="input flex-1">
                     <select x-model="hour" class="select w-28">
@@ -207,7 +205,135 @@
                     </button>
                     <input type="hidden" name="ends_at" :value="combined()">
                 </div>
+                <p class="text-xs text-base-content/60 mt-1">
+                    Leave empty to keep open until you close it manually.
+                </p>
             </fieldset>
+        </div>
+    </section>
+
+    <section class="p-6 space-y-4">
+        {% call section_header('users-group', 'Audience', 'primary') %}
+            <span x-show="visibility === 'PRIVATE'">Who can see and vote on this poll.</span>
+            <span x-show="visibility === 'PUBLIC'">Optional: people to notify by email. Everyone signed in can still see and vote.</span>
+        {% endcall %}
+
+        <button type="button"
+                x-show="visibility === 'PUBLIC' && !audienceExpanded"
+                x-cloak
+                @click="audienceExpanded = true"
+                class="btn btn-sm btn-ghost text-base-content/60 hover:text-base-content gap-2 -mx-2">
+            <i class="ti ti-plus"></i>Invite specific people by email
+        </button>
+
+        <div x-show="visibility === 'PRIVATE' || audienceExpanded" x-cloak class="space-y-4">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label class="text-xs font-medium text-base-content/70 mb-1 block">
+                    Users (<span x-text="users.length"></span>)
+                </label>
+                <div class="relative" @click.outside="userSearchOpen = false">
+                    <label class="input input-sm flex items-center gap-2 w-full">
+                        <i class="ti ti-search opacity-60"></i>
+                        <input type="text"
+                               placeholder="Search by name or email..."
+                               autocomplete="off"
+                               class="grow outline-none"
+                               x-ref="userSearchInput"
+                               hx-get="{{ url_for('polls.audience_search_global') }}"
+                               hx-trigger="input changed delay:250ms, focus"
+                               hx-target="#user-search-results"
+                               hx-include="this"
+                               hx-vals='{"kind": "user"}'
+                               @focus="userSearchOpen = true"
+                               @input="userSearchOpen = true"
+                               name="q">
+                    </label>
+                    <div id="user-search-results"
+                         x-show="userSearchOpen"
+                         @click="userSearchOpen = false"
+                         x-cloak
+                         class="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-auto bg-base-100 border border-base-300 rounded-box shadow-lg empty:hidden">
+                    </div>
+                </div>
+                <ul class="mt-2 border border-base-200 rounded-lg divide-y divide-base-200 max-h-56 overflow-auto"
+                    x-show="users.length > 0">
+                    <template x-for="u in users" :key="u.id">
+                        <li class="group flex items-center gap-3 px-3 py-2 hover:bg-base-200/40 transition-colors">
+                            <span class="shrink-0 w-6 h-6 rounded-full bg-primary/10 text-primary flex items-center justify-center">
+                                <i class="ti ti-user text-xs"></i>
+                            </span>
+                            <div class="flex-1 min-w-0">
+                                <div class="truncate text-sm" x-text="u.label"></div>
+                                <div class="truncate text-xs text-base-content/55" x-text="u.sublabel"></div>
+                            </div>
+                            <button type="button" @click="removeUser(u.id)"
+                                    class="shrink-0 w-6 h-6 rounded flex items-center justify-center text-base-content/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                                    title="Remove">
+                                <i class="ti ti-x text-sm"></i>
+                            </button>
+                        </li>
+                    </template>
+                </ul>
+                <p x-show="users.length === 0" class="text-xs text-base-content/50 mt-2">
+                    Search above to invite individual users.
+                </p>
+            </div>
+
+            <div>
+                <label class="text-xs font-medium text-base-content/70 mb-1 block">
+                    Groups (<span x-text="groups.length"></span>)
+                </label>
+                <div class="relative" @click.outside="groupSearchOpen = false">
+                    <label class="input input-sm flex items-center gap-2 w-full">
+                        <i class="ti ti-search opacity-60"></i>
+                        <input type="text"
+                               placeholder="Search groups..."
+                               autocomplete="off"
+                               class="grow outline-none"
+                               x-ref="groupSearchInput"
+                               hx-get="{{ url_for('polls.audience_search_global') }}"
+                               hx-trigger="input changed delay:250ms, focus"
+                               hx-target="#group-search-results"
+                               hx-include="this"
+                               hx-vals='{"kind": "group"}'
+                               @focus="groupSearchOpen = true"
+                               @input="groupSearchOpen = true"
+                               name="q">
+                    </label>
+                    <div id="group-search-results"
+                         x-show="groupSearchOpen"
+                         @click="groupSearchOpen = false"
+                         x-cloak
+                         class="absolute left-0 right-0 z-20 mt-1 max-h-72 overflow-auto bg-base-100 border border-base-300 rounded-box shadow-lg empty:hidden">
+                    </div>
+                </div>
+                <ul class="mt-2 border border-base-200 rounded-lg divide-y divide-base-200 max-h-56 overflow-auto"
+                    x-show="groups.length > 0">
+                    <template x-for="grp in groups" :key="grp.id">
+                        <li class="group flex items-center gap-3 px-3 py-2 hover:bg-base-200/40 transition-colors">
+                            <span class="shrink-0 w-6 h-6 rounded-full bg-success/10 text-success flex items-center justify-center">
+                                <i class="ti ti-users-group text-xs"></i>
+                            </span>
+                            <div class="flex-1 min-w-0 truncate text-sm" x-text="grp.label"></div>
+                            <button type="button" @click="removeGroup(grp.id)"
+                                    class="shrink-0 w-6 h-6 rounded flex items-center justify-center text-base-content/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                                    title="Remove">
+                                <i class="ti ti-x text-sm"></i>
+                            </button>
+                        </li>
+                    </template>
+                </ul>
+                <p x-show="groups.length === 0" class="text-xs text-base-content/50 mt-2">
+                    Search above to invite a whole group at once.
+                </p>
+            </div>
+        </div>
+
+        <p x-show="visibility === 'PRIVATE' && users.length === 0 && groups.length === 0 && status === 'ACTIVE'"
+           class="text-xs text-warning">
+            Add at least one user or group to activate this private poll.
+        </p>
         </div>
     </section>
 
@@ -287,6 +413,11 @@
 
             <input type="hidden" name="options" :value="serialize()">
         </div>
+
+        <p x-show="status === 'ACTIVE' && !hasOptions" x-cloak
+           class="text-xs text-warning">
+            Add at least one option to activate this poll.
+        </p>
     </section>
 
     <section class="p-6 space-y-4">
@@ -306,202 +437,216 @@
                     <div class="font-medium flex items-center gap-1.5">
                         <i class="ti ti-asterisk text-warning text-sm"></i>
                         Mandatory poll
+                        <span x-show="visibility === 'PUBLIC'"
+                              class="text-xs text-base-content/50 font-normal">
+                            — private polls only
+                        </span>
                     </div>
                     <div class="text-xs text-base-content/60 mt-0.5">
                         <span x-show="visibility !== 'PUBLIC'">
-                            Everyone in the audience must respond. Requires at least one audience member when activated.
+                            Every member of the audience must respond.
                         </span>
                         <span x-show="visibility === 'PUBLIC'">
-                            Not available when visible to everyone — there is no defined audience to require.
+                            Switch to Private to require responses from a specific audience.
                         </span>
                     </div>
                 </div>
             </label>
 
             <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
-                   :class="{ 'bg-base-200/40': customOptions }">
-                <input type="checkbox" name="allow_custom_options" value="true"
-                       x-model="customOptions"
+                   :class="{ 'bg-base-200/40': allowEdit }">
+                <input type="checkbox" name="allow_edit_responses" value="true"
+                       x-model="allowEdit"
                        class="checkbox checkbox-sm mt-0.5">
                 <div>
                     <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-message-plus text-info text-sm"></i>
-                        Allow custom options
+                        <i class="ti ti-edit text-info text-sm"></i>
+                        Allow editing responses
                     </div>
                     <div class="text-xs text-base-content/60 mt-0.5">
-                        Voters can suggest additional options during the poll. Other voters can then react to them.
-                    </div>
-                </div>
-            </label>
-
-            <div class="rounded-lg border border-base-300 hover:bg-base-200/40 transition-colors md:col-span-2"
-                 :class="{ 'bg-base-200/40': allowGuests }">
-                <label class="flex items-start gap-3 cursor-pointer p-3">
-                    <input type="checkbox" name="allow_guests" value="true"
-                           x-model="allowGuests"
-                           class="checkbox checkbox-sm mt-0.5">
-                    <div>
-                        <div class="font-medium flex items-center gap-1.5">
-                            <i class="ti ti-users-plus text-info text-sm"></i>
-                            Allow guests
-                        </div>
-                        <div class="text-xs text-base-content/60 mt-0.5">
-                            Voters can bring guests. Guests are added to the count for slots they accept (Yes).
-                        </div>
-                    </div>
-                </label>
-
-                <div x-show="allowGuests" x-cloak
-                     class="px-3 pb-3 pt-1 border-t border-base-200">
-                    <fieldset class="fieldset">
-                        <legend class="fieldset-legend">
-                            <i class="ti ti-users opacity-60"></i>Maximum guests per voter
-                        </legend>
-                        <div class="flex gap-2">
-                            <input type="number" name="max_guests"
-                                   min="1" max="9"
-                                   x-model="maxGuests"
-                                   placeholder="No limit"
-                                   class="input input-sm w-32">
-                            <button type="button" x-show="maxGuests !== '' && maxGuests !== null" x-cloak
-                                    @click="maxGuests = ''"
-                                    class="btn btn-ghost btn-sm btn-square text-base-content/40 hover:text-error"
-                                    title="Clear">
-                                <i class="ti ti-x"></i>
-                            </button>
-                        </div>
-                        <p class="text-xs text-base-content/60 mt-1.5">
-                            Leave empty for no limit. Allowed range: 1–9.
-                        </p>
-                    </fieldset>
-                </div>
-            </div>
-
-            <div class="rounded-lg border border-base-300 hover:bg-base-200/40 transition-colors md:col-span-2"
-                 :class="{ 'bg-base-200/40': allowEdit }">
-                <label class="flex items-start gap-3 cursor-pointer p-3">
-                    <input type="checkbox" name="allow_edit_responses" value="true"
-                           x-model="allowEdit"
-                           class="checkbox checkbox-sm mt-0.5">
-                    <div>
-                        <div class="font-medium flex items-center gap-1.5">
-                            <i class="ti ti-edit text-info text-sm"></i>
-                            Allow editing responses
-                        </div>
-                        <div class="text-xs text-base-content/60 mt-0.5">
-                            Voters can revise their response after submitting.
-                        </div>
-                    </div>
-                </label>
-
-                <div x-show="allowEdit" x-cloak
-                     class="px-3 pb-3 pt-1 border-t border-base-200">
-                    <fieldset class="fieldset">
-                        <legend class="fieldset-legend">
-                            <i class="ti ti-clock-edit opacity-60"></i>Editable until
-                        </legend>
-                        <div x-data='dateHourPicker({{ form_data.get("edit_responses_until", "") | tojson }})' class="flex gap-2">
-                            <input type="date" x-model="date" class="input input-sm flex-1 max-w-xs">
-                            <select x-model="hour" class="select select-sm w-24">
-                                <option value="">—</option>
-                                {% for h in range(24) %}
-                                <option value="{{ '%02d' % h }}">{{ '%02d' % h }}:00</option>
-                                {% endfor %}
-                            </select>
-                            <button type="button" x-show="date || hour" x-cloak @click="clear()"
-                                    class="btn btn-ghost btn-sm btn-square text-base-content/40 hover:text-error"
-                                    title="Clear">
-                                <i class="ti ti-x"></i>
-                            </button>
-                            <input type="hidden" name="edit_responses_until" :value="combined()">
-                        </div>
-                        <p class="text-xs text-base-content/60 mt-1.5">
-                            Leave empty to allow edits until the poll closes.
-                        </p>
-                    </fieldset>
-                </div>
-            </div>
-
-            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors md:col-span-2"
-                   :class="{ 'bg-base-200/40': autoDelete }">
-                <input type="checkbox" name="auto_delete" value="true"
-                       x-model="autoDelete"
-                       class="checkbox checkbox-sm mt-0.5">
-                <div>
-                    <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-trash text-error text-sm"></i>
-                        Auto-delete after closing
-                    </div>
-                    <div class="text-xs text-base-content/60 mt-0.5">
-                        Poll and all responses are permanently removed {{ retention_days }} days after the status is set to CLOSED.
-                    </div>
-                </div>
-            </label>
-
-            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
-                   :class="{ 'bg-base-200/40': notifyOwnerOnResponse }">
-                <input type="checkbox" name="notify_owner_on_response" value="true"
-                       x-model="notifyOwnerOnResponse"
-                       class="checkbox checkbox-sm mt-0.5">
-                <div>
-                    <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-mail-forward text-info text-sm"></i>
-                        Email me on each response
-                    </div>
-                    <div class="text-xs text-base-content/60 mt-0.5">
-                        You receive an email every time someone submits or updates a response.
-                    </div>
-                </div>
-            </label>
-
-            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
-                   :class="{ 'bg-base-200/40': notifyAudienceOnClose }">
-                <input type="checkbox" name="notify_audience_on_close" value="true"
-                       x-model="notifyAudienceOnClose"
-                       class="checkbox checkbox-sm mt-0.5">
-                <div>
-                    <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-mail-check text-info text-sm"></i>
-                        Notify audience when poll closes
-                    </div>
-                    <div class="text-xs text-base-content/60 mt-0.5">
-                        Audience members receive an email with the results link once the poll moves to CLOSED.
-                    </div>
-                </div>
-            </label>
-
-            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
-                   :class="{ 'bg-base-200/40': anonymousVotes }">
-                <input type="checkbox" name="anonymous_votes" value="true"
-                       x-model="anonymousVotes"
-                       class="checkbox checkbox-sm mt-0.5">
-                <div>
-                    <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-user-off text-info text-sm"></i>
-                        Anonymous responses
-                    </div>
-                    <div class="text-xs text-base-content/60 mt-0.5">
-                        Voter names and comments are hidden from everyone. Tallies are still shown.
-                    </div>
-                </div>
-            </label>
-
-            <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
-                   :class="{ 'bg-base-200/40': hideResultsUntilClose }">
-                <input type="checkbox" name="hide_results_until_close" value="true"
-                       x-model="hideResultsUntilClose"
-                       class="checkbox checkbox-sm mt-0.5">
-                <div>
-                    <div class="font-medium flex items-center gap-1.5">
-                        <i class="ti ti-eye-off text-info text-sm"></i>
-                        Hide results until close
-                    </div>
-                    <div class="text-xs text-base-content/60 mt-0.5">
-                        Voters see no tallies while the poll is open. Results become visible once it closes.
+                        Voters can revise their response while the poll is open.
                     </div>
                 </div>
             </label>
         </div>
+
+        <details class="collapse collapse-arrow border border-base-300 bg-base-100">
+            <summary class="collapse-title text-sm font-medium flex items-center gap-2">
+                <i class="ti ti-adjustments"></i>Advanced settings
+            </summary>
+            <div class="collapse-content space-y-5 pt-2">
+
+                {# Privacy ------------------------------------------------ #}
+                <div class="space-y-2">
+                    <h3 class="text-xs uppercase tracking-wide text-base-content/50 font-medium">
+                        Privacy
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                               :class="{ 'bg-base-200/40': anonymousVotes }">
+                            <input type="checkbox" name="anonymous_votes" value="true"
+                                   x-model="anonymousVotes"
+                                   class="checkbox checkbox-sm mt-0.5">
+                            <div>
+                                <div class="font-medium flex items-center gap-1.5">
+                                    <i class="ti ti-user-off text-info text-sm"></i>
+                                    Anonymous responses
+                                </div>
+                                <div class="text-xs text-base-content/60 mt-0.5">
+                                    Voter names and comments are hidden from everyone. Tallies are still shown.
+                                </div>
+                            </div>
+                        </label>
+
+                        <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                               :class="{ 'bg-base-200/40': hideResultsUntilClose }">
+                            <input type="checkbox" name="hide_results_until_close" value="true"
+                                   x-model="hideResultsUntilClose"
+                                   class="checkbox checkbox-sm mt-0.5">
+                            <div>
+                                <div class="font-medium flex items-center gap-1.5">
+                                    <i class="ti ti-eye-off text-info text-sm"></i>
+                                    Hide results until close
+                                </div>
+                                <div class="text-xs text-base-content/60 mt-0.5">
+                                    Voters see no tallies while the poll is open. Results become visible once it closes.
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                {# Voting behavior --------------------------------------- #}
+                <div class="space-y-2">
+                    <h3 class="text-xs uppercase tracking-wide text-base-content/50 font-medium">
+                        Voting behavior
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                               :class="{ 'bg-base-200/40': customOptions }">
+                            <input type="checkbox" name="allow_custom_options" value="true"
+                                   x-model="customOptions"
+                                   class="checkbox checkbox-sm mt-0.5">
+                            <div>
+                                <div class="font-medium flex items-center gap-1.5">
+                                    <i class="ti ti-message-plus text-info text-sm"></i>
+                                    Allow custom options
+                                </div>
+                                <div class="text-xs text-base-content/60 mt-0.5">
+                                    Voters can suggest additional options during the poll. Other voters can then react to them.
+                                </div>
+                            </div>
+                        </label>
+
+                        <div class="rounded-lg border border-base-300 hover:bg-base-200/40 transition-colors"
+                             :class="{ 'bg-base-200/40': allowGuests }">
+                            <label class="flex items-start gap-3 cursor-pointer p-3">
+                                <input type="checkbox" name="allow_guests" value="true"
+                                       x-model="allowGuests"
+                                       class="checkbox checkbox-sm mt-0.5">
+                                <div>
+                                    <div class="font-medium flex items-center gap-1.5">
+                                        <i class="ti ti-users-plus text-info text-sm"></i>
+                                        Allow guests
+                                    </div>
+                                    <div class="text-xs text-base-content/60 mt-0.5">
+                                        Voters can bring guests. Guests are added to the count for slots they accept (Yes).
+                                    </div>
+                                </div>
+                            </label>
+
+                            <div x-show="allowGuests" x-cloak
+                                 class="px-3 pb-3 pt-1 border-t border-base-200">
+                                <fieldset class="fieldset">
+                                    <legend class="fieldset-legend">
+                                        <i class="ti ti-users opacity-60"></i>Maximum guests per voter
+                                    </legend>
+                                    <div class="flex gap-2">
+                                        <input type="number" name="max_guests"
+                                               min="1" max="9"
+                                               x-model="maxGuests"
+                                               placeholder="No limit"
+                                               class="input input-sm w-32">
+                                        <button type="button" x-show="maxGuests !== '' && maxGuests !== null" x-cloak
+                                                @click="maxGuests = ''"
+                                                class="btn btn-ghost btn-sm btn-square text-base-content/40 hover:text-error"
+                                                title="Clear">
+                                            <i class="ti ti-x"></i>
+                                        </button>
+                                    </div>
+                                    <p class="text-xs text-base-content/60 mt-1.5">
+                                        Leave empty for no limit. Allowed range: 1–9.
+                                    </p>
+                                </fieldset>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                {# Notifications ----------------------------------------- #}
+                <div class="space-y-2">
+                    <h3 class="text-xs uppercase tracking-wide text-base-content/50 font-medium">
+                        Notifications
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                               :class="{ 'bg-base-200/40': notifyOwnerOnResponse }">
+                            <input type="checkbox" name="notify_owner_on_response" value="true"
+                                   x-model="notifyOwnerOnResponse"
+                                   class="checkbox checkbox-sm mt-0.5">
+                            <div>
+                                <div class="font-medium flex items-center gap-1.5">
+                                    <i class="ti ti-mail-forward text-info text-sm"></i>
+                                    Email me on each response
+                                </div>
+                                <div class="text-xs text-base-content/60 mt-0.5">
+                                    You receive an email every time someone submits or updates a response.
+                                </div>
+                            </div>
+                        </label>
+
+                        <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                               :class="{ 'bg-base-200/40': notifyAudienceOnClose }">
+                            <input type="checkbox" name="notify_audience_on_close" value="true"
+                                   x-model="notifyAudienceOnClose"
+                                   class="checkbox checkbox-sm mt-0.5">
+                            <div>
+                                <div class="font-medium flex items-center gap-1.5">
+                                    <i class="ti ti-mail-check text-info text-sm"></i>
+                                    Notify audience when poll closes
+                                </div>
+                                <div class="text-xs text-base-content/60 mt-0.5">
+                                    Audience members receive an email with the results link once the poll moves to CLOSED.
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                </div>
+
+                {# Lifecycle --------------------------------------------- #}
+                <div class="space-y-2">
+                    <h3 class="text-xs uppercase tracking-wide text-base-content/50 font-medium">
+                        Lifecycle
+                    </h3>
+                    <label class="flex items-start gap-3 cursor-pointer rounded-lg border border-base-300 p-3 hover:bg-base-200/40 transition-colors"
+                           :class="{ 'bg-base-200/40': autoDelete }">
+                        <input type="checkbox" name="auto_delete" value="true"
+                               x-model="autoDelete"
+                               class="checkbox checkbox-sm mt-0.5">
+                        <div>
+                            <div class="font-medium flex items-center gap-1.5">
+                                <i class="ti ti-trash text-error text-sm"></i>
+                                Auto-delete after closing
+                            </div>
+                            <div class="text-xs text-base-content/60 mt-0.5">
+                                Poll and all responses are permanently removed {{ retention_days }} days after the status is set to CLOSED.
+                            </div>
+                        </div>
+                    </label>
+                </div>
+
+            </div>
+        </details>
     </section>
 
     <div class="flex items-center justify-between p-6 bg-base-200/40 rounded-b-box">
@@ -516,7 +661,10 @@
         </div>
         <div class="flex gap-2">
             <a href="{{ url_for('polls.my') }}" class="btn btn-ghost">Cancel</a>
-            <button type="submit" class="btn btn-primary">
+            <button type="submit"
+                    class="btn btn-primary"
+                    :disabled="saveBlocked()"
+                    :title="saveBlocked() ? saveBlockedReason() : ''">
                 <i class="ti ti-device-floppy"></i>Save
             </button>
         </div>

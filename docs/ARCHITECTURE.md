@@ -237,7 +237,7 @@ erDiagram
 - **Mandatory polls**: `is_mandatory=True` means every audience member must respond. Two invariants are enforced server-side:
   - `visibility=PUBLIC` ⇒ `is_mandatory=False` (a public poll has no defined audience to require)
   - `is_mandatory=True` + `status=ACTIVE` ⇒ audience must be non-empty (DRAFT polls may be mandatory without audience yet)
-- **Visibility**: `PRIVATE` polls rely on the audience tables (`poll_users`, `poll_groups`) for access control. `PUBLIC` polls are open to every authenticated user; audience tables are empty in that case. Anonymous access is never allowed.
+- **Visibility**: `PRIVATE` polls rely on the audience tables (`poll_users`, `poll_groups`) for access control. `PUBLIC` polls are open to every authenticated user; the audience tables remain in use to drive invitation/closing emails for a curated subset, but they are *not* consulted for access control. Anonymous access is never allowed.
 - **Share token**: every poll has a `share_token` (UUID, default `gen_random_uuid()`) for link sharing. The share link grants access only to users already in the audience (PRIVATE) or to any authenticated user (PUBLIC) — never bypasses auth.
 - **Response mode** (`PollResponseMode`): determines the semantics of `PollResponseOption.status`:
   - `YES_NO_MAYBE` — classic Doodle: status is `YES` / `NO` / `MAYBE`

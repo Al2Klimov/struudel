@@ -94,26 +94,3 @@ def test_ends_at_equal_to_starts_at_rejected() -> None:
 def test_starts_at_only_is_fine() -> None:
     form = PollForm.model_validate(_base_form(starts_at="2026-07-15T14:00"))
     assert form.ends_at is None
-
-
-def test_edit_responses_until_must_not_exceed_ends_at() -> None:
-    with pytest.raises(ValidationError) as exc:
-        PollForm.model_validate(
-            _base_form(
-                starts_at="2026-07-15T10:00",
-                ends_at="2026-07-15T18:00",
-                edit_responses_until="2026-07-15T20:00",
-                allow_edit_responses="on",
-            )
-        )
-    assert "edit_responses_until cannot be after ends_at" in str(exc.value)
-
-
-def test_edit_responses_until_only_checked_when_allow_edit_set() -> None:
-    PollForm.model_validate(
-        _base_form(
-            starts_at="2026-07-15T10:00",
-            ends_at="2026-07-15T18:00",
-            edit_responses_until="2026-07-15T20:00",
-        )
-    )
