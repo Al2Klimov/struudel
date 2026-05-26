@@ -260,6 +260,14 @@ class MandatoryRequiresAudienceError(ValueError):
     """Raised when a mandatory poll is activated without any audience."""
 
 
+class PrivateRequiresAudienceError(ValueError):
+    """Raised when a private poll is activated without any audience.
+
+    Without an audience, a private poll is reachable only by its owner — every
+    other authenticated user gets 403 on the share link.
+    """
+
+
 class ActiveRequiresOptionsError(ValueError):
     """Raised when a poll is activated without any options."""
 
@@ -311,6 +319,13 @@ def create_poll(db: Session, *, form: PollForm, created_by_id: int) -> Poll:
             "mandatory polls require a non-empty audience before activation"
         )
 
+    if form.visibility == PollVisibility.PRIVATE and form.status == PollStatus.ACTIVE:
+        # At create-time there is no audience yet, so any PRIVATE+ACTIVE attempt
+        # is unreachable for everyone except the owner.
+        raise PrivateRequiresAudienceError(
+            "private polls require a non-empty audience before activation"
+        )
+
     poll = Poll(
         title=form.title,
         description_short=form.description_short,
@@ -356,6 +371,15 @@ def update_poll(db: Session, *, poll: Poll, form: PollForm) -> Poll:
     ):
         raise MandatoryRequiresAudienceError(
             "mandatory polls require a non-empty audience before activation"
+        )
+
+    if (
+        form.visibility == PollVisibility.PRIVATE
+        and form.status == PollStatus.ACTIVE
+        and count_poll_audience(db, poll_id=poll.id) == 0
+    ):
+        raise PrivateRequiresAudienceError(
+            "private polls require a non-empty audience before activation"
         )
 
     old_status = poll.status
@@ -723,6 +747,16 @@ def set_poll_audience(
     if poll.is_mandatory and poll.status == PollStatus.ACTIVE and not users and not groups:
         raise MandatoryRequiresAudienceError(
             "mandatory polls require a non-empty audience while active"
+        )
+
+    if (
+        poll.visibility == PollVisibility.PRIVATE
+        and poll.status == PollStatus.ACTIVE
+        and not users
+        and not groups
+    ):
+        raise PrivateRequiresAudienceError(
+            "private polls require a non-empty audience while active"
         )
 
     old_user_ids = get_audience_user_ids(db, poll_id=poll.id)

@@ -1,9 +1,11 @@
+import json
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import pytest
 from sqlalchemy.orm import Session
 
+from struudel.blueprints.polls.forms import PollForm
 from struudel.models.group import Group
 from struudel.models.poll import (
     Poll,
@@ -383,3 +385,110 @@ def test_search_audience_candidates_excludes_hidden_groups(db_session: Session) 
 
     assert "visible-team" in names
     assert "hidden-team" not in names
+
+
+# ---------------------------------------------------------------------------
+# PrivateRequiresAudienceError — guards against unreachable PRIVATE polls
+# ---------------------------------------------------------------------------
+
+
+def _private_active_form() -> PollForm:
+    return PollForm.model_validate(
+        {
+            "title": "Spaghettieis",
+            "status": "ACTIVE",
+            "visibility": "PRIVATE",
+            "options": json.dumps([{"type": "TEXT", "text_value": "Yes"}]),
+        }
+    )
+
+
+def test_create_poll_private_active_raises_without_audience(db_session: Session) -> None:
+    owner = make_user(db_session)
+    with pytest.raises(poll_service.PrivateRequiresAudienceError):
+        poll_service.create_poll(db_session, form=_private_active_form(), created_by_id=owner.id)
+
+
+def test_update_poll_blocks_activation_of_private_without_audience(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.DRAFT,
+        visibility=PollVisibility.PRIVATE,
+    )
+
+    with pytest.raises(poll_service.PrivateRequiresAudienceError):
+        poll_service.update_poll(db_session, poll=poll, form=_private_active_form())
+
+
+def test_update_poll_allows_activation_of_private_with_audience(db_session: Session) -> None:
+    owner = make_user(db_session)
+    invitee = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.DRAFT,
+        visibility=PollVisibility.PRIVATE,
+    )
+    poll_service.set_poll_audience(db_session, poll=poll, users=[invitee.id], groups=[])
+
+    poll_service.update_poll(db_session, poll=poll, form=_private_active_form())
+    assert poll.status == PollStatus.ACTIVE
+
+
+def test_set_poll_audience_rejects_empty_for_active_private(db_session: Session) -> None:
+    owner = make_user(db_session)
+    invitee = make_user(db_session)
+    poll = _make_poll(db_session, owner_id=owner.id, visibility=PollVisibility.PRIVATE)
+    poll_service.set_poll_audience(db_session, poll=poll, users=[invitee.id], groups=[])
+
+    with pytest.raises(poll_service.PrivateRequiresAudienceError):
+        poll_service.set_poll_audience(db_session, poll=poll, users=[], groups=[])
+
+
+def test_set_poll_audience_allows_empty_for_draft_private(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(
+        db_session,
+        owner_id=owner.id,
+        status=PollStatus.DRAFT,
+        visibility=PollVisibility.PRIVATE,
+    )
+    # Should not raise — DRAFT can have empty audience.
+    poll_service.set_poll_audience(db_session, poll=poll, users=[], groups=[])
+
+
+def test_set_poll_audience_allows_empty_for_active_public(db_session: Session) -> None:
+    owner = make_user(db_session)
+    poll = _make_poll(db_session, owner_id=owner.id, visibility=PollVisibility.PUBLIC)
+    # PUBLIC polls ignore the audience for access control — empty is fine.
+    poll_service.set_poll_audience(db_session, poll=poll, users=[], groups=[])
+
+
+def test_create_poll_private_draft_ok(db_session: Session) -> None:
+    owner = make_user(db_session)
+    form = PollForm.model_validate(
+        {
+            "title": "Draft",
+            "status": "DRAFT",
+            "visibility": "PRIVATE",
+            "options": json.dumps([{"type": "TEXT", "text_value": "Yes"}]),
+        }
+    )
+    poll = poll_service.create_poll(db_session, form=form, created_by_id=owner.id)
+    assert poll.status == PollStatus.DRAFT
+
+
+def test_create_poll_public_active_ok_without_audience(db_session: Session) -> None:
+    owner = make_user(db_session)
+    form = PollForm.model_validate(
+        {
+            "title": "Public",
+            "status": "ACTIVE",
+            "visibility": "PUBLIC",
+            "options": json.dumps([{"type": "TEXT", "text_value": "Yes"}]),
+        }
+    )
+    poll = poll_service.create_poll(db_session, form=form, created_by_id=owner.id)
+    assert poll.status == PollStatus.ACTIVE

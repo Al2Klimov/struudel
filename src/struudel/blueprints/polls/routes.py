@@ -16,7 +16,7 @@ from struudel.auth import require_auth
 from struudel.blueprints.polls import bp
 from struudel.blueprints.polls.forms import AudienceForm, PollForm, PollOptionData, VoteForm
 from struudel.database import SessionLocal
-from struudel.models.poll import Poll, PollStatus
+from struudel.models.poll import Poll, PollStatus, PollVisibility
 from struudel.models.poll_option import PollOption, PollOptionType
 from struudel.models.poll_response import PollResponse
 from struudel.services import poll as poll_service
@@ -123,7 +123,11 @@ def new() -> str | Response | tuple[str, int]:
         )
 
     downgraded_to_draft = False
-    if form.is_mandatory and form.status == PollStatus.ACTIVE:
+    if form.status == PollStatus.ACTIVE and (
+        form.is_mandatory or form.visibility == PollVisibility.PRIVATE
+    ):
+        # New polls have no audience yet — a PRIVATE or mandatory poll going
+        # straight to ACTIVE would be unreachable for the intended audience.
         form = form.model_copy(update={"status": PollStatus.DRAFT})
         downgraded_to_draft = True
 
@@ -148,7 +152,7 @@ def new() -> str | Response | tuple[str, int]:
             "Saved as draft. Invite your audience here, then set status to Active in Edit.",
             "info",
         )
-        return redirect(url_for("polls.audience", poll_id=poll_id))
+        return redirect(url_for("polls.audience", poll_id=poll_id, return_to="edit"))
 
     return redirect(url_for("polls.edit", poll_id=poll_id))
 
@@ -219,6 +223,20 @@ def edit(poll_id: int) -> str | Response | tuple[str, int]:
                         fallback=_poll_options_to_dicts(poll.options),
                     ),
                     errors=[{"loc": ("is_mandatory",), "msg": str(exc)}],
+                ),
+                400,
+            )
+        except poll_service.PrivateRequiresAudienceError as exc:
+            return (
+                render_template(
+                    "polls/edit.html",
+                    poll=poll,
+                    form_data=request.form,
+                    poll_options=_form_options_fallback(
+                        request.form.get("options", ""),
+                        fallback=_poll_options_to_dicts(poll.options),
+                    ),
+                    errors=[{"loc": ("visibility",), "msg": str(exc)}],
                 ),
                 400,
             )
@@ -406,6 +424,10 @@ def audience(poll_id: int) -> str | Response | tuple[str, int]:
         if poll.created_by_id != g.user["id"]:
             abort(403)
 
+        return_to = _audience_return_to(
+            request.args.get("return_to") or request.form.get("return_to")
+        )
+
         if request.method == "GET":
             users, groups = poll_service.get_poll_audience(db, poll=poll)
             return render_template(
@@ -414,6 +436,7 @@ def audience(poll_id: int) -> str | Response | tuple[str, int]:
                 is_owner=True,
                 initial_users=_audience_users_to_dicts(users),
                 initial_groups=_audience_groups_to_dicts(groups),
+                return_to=return_to,
                 errors=[],
             )
 
@@ -428,6 +451,7 @@ def audience(poll_id: int) -> str | Response | tuple[str, int]:
                     is_owner=True,
                     initial_users=_audience_users_to_dicts(users),
                     initial_groups=_audience_groups_to_dicts(groups),
+                    return_to=return_to,
                     errors=exc.errors(),
                 ),
                 400,
@@ -440,7 +464,10 @@ def audience(poll_id: int) -> str | Response | tuple[str, int]:
                 users=[m.id for m in form.users],
                 groups=[m.id for m in form.groups],
             )
-        except poll_service.MandatoryRequiresAudienceError as exc:
+        except (
+            poll_service.MandatoryRequiresAudienceError,
+            poll_service.PrivateRequiresAudienceError,
+        ) as exc:
             users, groups = poll_service.get_poll_audience(db, poll=poll)
             return (
                 render_template(
@@ -449,12 +476,19 @@ def audience(poll_id: int) -> str | Response | tuple[str, int]:
                     is_owner=True,
                     initial_users=_audience_users_to_dicts(users),
                     initial_groups=_audience_groups_to_dicts(groups),
+                    return_to=return_to,
                     errors=[{"loc": ("audience",), "msg": str(exc)}],
                 ),
                 400,
             )
 
+    if return_to == "edit":
+        return redirect(url_for("polls.edit", poll_id=poll_id))
     return redirect(url_for("polls.audience", poll_id=poll_id))
+
+
+def _audience_return_to(value: str | None) -> str | None:
+    return "edit" if value == "edit" else None
 
 
 @bp.route("/<int:poll_id>/audience/search")

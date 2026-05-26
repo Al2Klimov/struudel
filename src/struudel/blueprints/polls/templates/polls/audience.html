@@ -52,6 +52,9 @@
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="users"  :value="serializeUsers()">
         <input type="hidden" name="groups" :value="serializeGroups()">
+        {% if return_to %}
+        <input type="hidden" name="return_to" value="{{ return_to }}">
+        {% endif %}
 
         <div class="grid grid-cols-1 md:grid-cols-2 divide-y md:divide-y-0 md:divide-x divide-base-200">
 
