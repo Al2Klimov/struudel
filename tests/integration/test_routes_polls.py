@@ -305,7 +305,14 @@ def test_edit_with_responses_requires_confirm(db_session: Session, client: Flask
     )
     login_as(client, owner)
 
-    resp = client.post(f"/polls/{poll.id}/edit", data=_edit_form_payload(poll))
+    # Remove option "B" — would delete its votes, so the edit is destructive.
+    resp = client.post(
+        f"/polls/{poll.id}/edit",
+        data=_edit_form_payload(
+            poll,
+            options=json.dumps([{"type": "TEXT", "text_value": "A"}]),
+        ),
+    )
     assert resp.status_code == 200
     assert b"already submitted" in resp.data
 
