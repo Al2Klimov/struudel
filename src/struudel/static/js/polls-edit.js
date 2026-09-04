@@ -80,7 +80,10 @@ function optionsEditor(initial, initialGroups) {
             });
         },
         add() {
-            this.options.push(mk());
+            const above = this.options[this.options.length - 1];
+            const newOption = mk();
+            newOption.group_uid = above ? above.group_uid : null;
+            this.options.push(newOption);
         },
         remove(i) {
             this.options.splice(i, 1);
