@@ -64,7 +64,8 @@ function optionsEditor(initial) {
             });
         },
         add() {
-            this.options.push(mk());
+            const above = this.options[this.options.length - 1];
+            this.options.push(mk(above ? { type: above.type } : null));
         },
         remove(i) {
             this.options.splice(i, 1);
